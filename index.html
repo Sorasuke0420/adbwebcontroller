@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>KYF36 Android Controller</title>
+    <style>
+        body { font-family: sans-serif; text-align: center; padding: 20px; background: #f0f0f0; }
+        button { margin: 10px; padding: 15px 25px; font-size: 16px; border-radius: 8px; border: none; background: #007aff; color: white; }
+        input { padding: 10px; font-size: 16px; width: 80%; max-width: 300px; }
+        .pad { display: grid; grid-template-columns: repeat(3, 1fr); width: 200px; margin: 20px auto; }
+    </style>
+</head>
+<body>
+
+    <h2>KYF36 コントローラー</h2>
+    
+    <!-- 1. 最初にUSBでKYF36と接続するボタン -->
+    <button id="connectBtn">KYF36とUSB接続</button>
+
+    <hr>
+
+    <!-- 2. キーボード入力エリア -->
+    <div>
+        <input type="text" id="textInput" placeholder="ここに文字を入力">
+        <button id="sendTextBtn">送信</button>
+    </div>
+
+    <hr>
+
+    <!-- 3. 十字キー・タッチ操作エリア -->
+    <div class="pad">
+        <div></div><button id="btnUp">▲</button><div></div>
+        <button id="btnLeft">◀</button><button id="btnCenter">決定</button><button id="btnRight">▶</button>
+        <div></div><button id="btnDown">▼</button><div></div>
+    </div>
+    <button id="btnBack">戻る</button>
+
+    <!-- WebUSB経由でADB通信を行うためのJavaScriptライブラリ（webadb等）を読み込む -->
+    <script src="https://cdn.jsdelivr.net/npm/webadb@0.1.1/webadb.js"></script>
+    <script>
+        let adb;
+        let shell;
+
+        // USB接続処理
+        document.getElementById('connectBtn').onclick = async () => {
+            try {
+                // Android ChromeがUSBデバイス（KYF36）を探索
+                const device = await Adb.open("webusb");
+                await device.connectAdb("host::");
+                adb = device;
+                alert("KYF36と接続成功！");
+            } catch (e) {
+                alert("接続エラー: " + e);
+            }
+        };
+
+        // コマンド送信共通関数
+        async function sendCommand(cmd) {
+            if (!adb) return alert("先にUSB接続してください");
+            let shell = await adb.shell(cmd);
+            await shell.receive(); // コマンド実行
+        }
+
+        // 文字送信
+        document.getElementById('sendTextBtn').onclick = () => {
+            let text = document.getElementById('textInput').value.replace(/ /g, '%s');
+            sendCommand(`input text "${text}"`);
+            document.getElementById('textInput').value = '';
+        };
+
+        // 十字キー（Keyevent）
+        document.getElementById('btnUp').onclick = () => sendCommand('input keyevent 19');
+        document.getElementById('btnDown').onclick = () => sendCommand('input keyevent 20');
+        document.getElementById('btnLeft').onclick = () => sendCommand('input keyevent 21');
+        document.getElementById('btnRight').onclick = () => sendCommand('input keyevent 22');
+        document.getElementById('btnCenter').onclick = () => sendCommand('input keyevent 23');
+        document.getElementById('btnBack').onclick = () => sendCommand('input keyevent 4');
+    </style>
+</body>
+</html>
