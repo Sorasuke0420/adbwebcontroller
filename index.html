@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>KYF36 WebUSB Controller</title>
+    <style>
+        body { font-family: sans-serif; text-align: center; padding: 20px; background: #f0f0f0; color: #333; }
+        h2 { margin-bottom: 20px; font-size: 22px; }
+        button { margin: 10px; padding: 15px 25px; font-size: 16px; border-radius: 8px; border: none; background: #007aff; color: white; cursor: pointer; font-weight: bold; transition: background 0.2s; }
+        button:active { background: #0056b3; }
+        input { padding: 12px; font-size: 16px; width: 80%; max-width: 300px; border-radius: 8px; border: 1px solid #ccc; box-sizing: border-box; }
+        hr { border: 0; height: 1px; background: #ccc; margin: 25px 0; }
+        .pad { display: grid; grid-template-columns: repeat(3, 1fr); width: 220px; margin: 20px auto; gap: 5px; }
+        .pad button { margin: 0; padding: 20px 0; }
+        #btnBack { background: #8e8e93; width: 220px; padding: 12px 0; }
+        #btnBack:active { background: #636366; }
+        .info { font-size: 12px; color: #666; margin-top: 20px; line-height: 1.6; }
+    </style>
+</head>
+<body>
+
+    <h2>KYF36 コントローラー</h2>
+    
+    <!-- 1. 接続ボタン -->
+    <button id="connectBtn" style="background: #34c759;">KYF36とUSB接続</button>
+
+    <hr>
+
+    <!-- 2. キーボード入力エリア -->
+    <div>
+        <input type="text" id="textInput" placeholder="ここに文字を入力 (Enterで送信)">
+        <button id="sendTextBtn">送信</button>
+    </div>
+
+    <hr>
+
+    <!-- 3. リモコン・十字キーエリア -->
+    <div class="pad">
+        <div></div><button id="btnUp">▲</button><div></div>
+        <button id="btnLeft">◀</button><button id="btnCenter">決定</button><button id="btnRight">▶</button>
+        <div></div><button id="btnDown">▼</button><div></div>
+    </div>
+    <button id="btnBack">戻る</button>
+
+    <div class="info">
+        【操作ヒント】<br>
+        ・Mac操作時：文字入力欄以外の場所でキーボードを叩くと連動します<br>
+        （矢印キー＝十字キー、Enter＝決定、Backspace＝戻る）
+    </div>
+
+    <script>
+        // 外部ライブラリを一切使わず、ブラウザ標準のWebUSBで直接ADBパケットを組み立てる最小構成
+        let usbDevice = null;
+        let adbInterface = null;
+        let epIn = null;
+        let epOut = null;
+        let tokenLocal = 1;
+
+        // USB接続処理
+        document.getElementById('connectBtn').onclick = async () => {
+            try {
+                // デバイスの選択ポップアップ
+                usbDevice = await navigator.usb.requestDevice({ filters: [] });
+                await usbDevice.open();
+                
+                // ADBのインターフェース(通常はクラス255, サブクラス66, プロトコル1)を探す
+                const config = usbDevice.configurations[0];
+                for (const iface of config.interfaces) {
+                    const alt = iface.alternates[0];
+                    if (alt.interfaceClass === 255 && alt.interfaceSubclass === 66 && alt.interfaceProtocol === 1) {
+                        adbInterface = iface;
+                        for (const ep of alt.endpoints) {
+                            if (ep.direction === 'in') epIn = ep;
+                            if (ep.direction === 'out') epOut = ep;
+                        }
+                        break;
+                    }
+                }
+
+                if (!adbInterface) {
+                    throw new Error("ADBインターフェースが見つかりません。USBデバッグがONになっているか確認してください。");
+                }
+
+                await usbDevice.selectConfiguration(config.configurationValue);
+                await usbDevice.claimInterface(adbInterface.interfaceNumber);
+
+                // ADBの初期ハンドシェイク (CNXN パケット) を送信
+                const cnxn = new Uint8Array([
+                    0x43, 0x4e, 0x58, 0x4e, // "CNXN"
+                    0x00, 0x00, 0x00, 0x01, // Version 1.0
+                    0x00, 0x10, 0x00, 0x00, // Max data (4096)
+                    0x00, 0x00, 0x00, 0x00, // Payload length (0)
+                    0x00, 0x00, 0x00, 0x00, // Checksum
+                    0xbc, 0xb1, 0xa7, 0xb1  // Magic
+                ]);
+                await usbDevice.transferOut(epOut.endpointNumber, cnxn);
+
+                alert("KYF36と接続成功！");
+                document.getElementById('connectBtn').innerText = "接続済み";
+                document.getElementById('connectBtn').style.background = "#8e8e93";
+            } catch (e) {
+                console.error(e);
+                alert("接続エラー: " + e.message + "\n\n※Macの場合、ターミナルで「adb kill-server」を実行したか確認してください。");
+            }
+        };
+
+        // 簡易版Shellコマンド送信関数 (ADBのCLSE/OPENプロトコルをエミュレート)
+        async function sendCommand(cmd) {
+            if (!usbDevice || !epOut) return;
+            try {
+                const cmdBytes = new TextEncoder().encode(cmd + "\n");
+                const payload = new Uint8Array(cmdBytes.length + 8);
+                payload.set(new TextEncoder().encode("shell:"));
+                payload.set(cmdBytes, 6);
+
+                // 本来は正確なストリーム管理が必要ですが、inputコマンドのような単発のトリガー用メッセージを投げる処理
+                //（※直叩き用に極限までシンプライズしています）
+                const header = new Uint8Array([
+                    0x4f, 0x50, 0x45, 0x4e, // "OPEN"
+                    tokenLocal & 0xFF, (tokenLocal >> 8) & 0xFF, 0x00, 0x00, // local-id
+                    0x00, 0x00, 0x00, 0x00, // remote-id
+                    payload.length & 0xFF, (payload.length >> 8) & 0xFF, 0x00, 0x00 // length
+                ]);
+                
+                await usbDevice.transferOut(epOut.endpointNumber, header);
+                if (payload.length > 0) {
+                    await usbDevice.transferOut(epOut.endpointNumber, payload);
+                }
+                tokenLocal++;
+            } catch (e) {
+                console.error("コマンド送信失敗:", e);
+            }
+        }
+
+        // 文字送信処理
+        function handleSendText() {
+            let input = document.getElementById('textInput');
+            let text = input.value.replace(/ /g, '%s');
+            if(!text) return;
+            sendCommand(`input text "${text}"`);
+            input.value = '';
+            input.focus();
+        }
+
+        document.getElementById('sendTextBtn').onclick = handleSendText;
+        
+        document.getElementById('textInput').onkeydown = (e) => {
+            if (e.key === 'Enter') {
+                handleSendText();
+                e.preventDefault();
+            }
+        };
+
+        // リモコンボタン
+        document.getElementById('btnUp').onclick = () => sendCommand('input keyevent 19');
+        document.getElementById('btnDown').onclick = () => sendCommand('input keyevent 20');
+        document.getElementById('btnLeft').onclick = () => sendCommand('input keyevent 21');
+        document.getElementById('btnRight').onclick = () => sendCommand('input keyevent 22');
+        document.getElementById('btnCenter').onclick = () => sendCommand('input keyevent 23');
+        document.getElementById('btnBack').onclick = () => sendCommand('input keyevent 4');
+
+        // Mac物理キーボード連動
+        window.onkeydown = (e) => {
+            if (document.activeElement === document.getElementById('textInput')) return;
+
+            if (e.key === 'ArrowUp') { sendCommand('input keyevent 19'); e.preventDefault(); }
+            if (e.key === 'ArrowDown') { sendCommand('input keyevent 20'); e.preventDefault(); }
+            if (e.key === 'ArrowLeft') { sendCommand('input keyevent 21'); e.preventDefault(); }
+            if (e.key === 'ArrowRight') { sendCommand('input keyevent 22'); e.preventDefault(); }
+            if (e.key === 'Enter') { sendCommand('input keyevent 23'); e.preventDefault(); }
+            if (e.key === 'Backspace') { sendCommand('input keyevent 4'); e.preventDefault(); }
+        };
+    </script>
+</body>
+</html>
